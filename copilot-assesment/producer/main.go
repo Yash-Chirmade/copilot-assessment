@@ -59,110 +59,66 @@ func main() {
 	})
 	defer w.Close()
 
-	// Step 1: Create users
-	userCount := 5
-	orderPerUser := 2
-	paymentPerOrder := 1
-	var userIDs []string
-	var orderIDs []string
-	for i := 0; i < userCount; i++ {
-		userID := randomID()
-		userIDs = append(userIDs, userID)
-		e := UserCreated{
-			EventID:   randomID(),
-			UserID:    userID,
-			Name:      randomName(),
-			Email:     randomEmail(),
-			CreatedAt: time.Now(),
-			Type:      "UserCreated",
-		}
-		payload, _ := json.Marshal(e)
-		err := w.WriteMessages(context.Background(), kafka.Message{
-			Key:   []byte(userID),
-			Value: payload,
-		})
-		if err != nil {
-			log.Printf("failed to write UserCreated: %v", err)
-		} else {
-			log.Printf("produced UserCreated event: %s", userID)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// Step 2: Create orders for each user
-	for _, userID := range userIDs {
-		for j := 0; j < orderPerUser; j++ {
-			orderID := randomID()
-			orderIDs = append(orderIDs, orderID)
+	eventTypes := []string{"UserCreated", "OrderPlaced", "PaymentSettled", "InventoryAdjusted"}
+	for i := 0; i < 20; i++ {
+		t := eventTypes[rand.Intn(len(eventTypes))]
+		var key string
+		var payload []byte
+		switch t {
+		case "UserCreated":
+			e := UserCreated{
+				EventID:   randomID(),
+				UserID:    randomID(),
+				Name:      randomName(),
+				Email:     randomEmail(),
+				CreatedAt: time.Now(),
+				Type:      t,
+			}
+			key = e.UserID
+			payload, _ = json.Marshal(e)
+		case "OrderPlaced":
 			e := OrderPlaced{
 				EventID:   randomID(),
-				OrderID:   orderID,
-				UserID:    userID,
+				OrderID:   randomID(),
+				UserID:    randomID(),
 				Amount:    rand.Float64() * 100,
 				CreatedAt: time.Now(),
-				Type:      "OrderPlaced",
+				Type:      t,
 			}
-			payload, _ := json.Marshal(e)
-			err := w.WriteMessages(context.Background(), kafka.Message{
-				Key:   []byte(orderID),
-				Value: payload,
-			})
-			if err != nil {
-				log.Printf("failed to write OrderPlaced: %v", err)
-			} else {
-				log.Printf("produced OrderPlaced event: %s (user %s)", orderID, userID)
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-	}
-
-	// Step 3: Create payments for each order
-	for _, orderID := range orderIDs {
-		for k := 0; k < paymentPerOrder; k++ {
-			paymentID := randomID()
+			key = e.OrderID
+			payload, _ = json.Marshal(e)
+		case "PaymentSettled":
 			e := PaymentSettled{
 				EventID:   randomID(),
-				PaymentID: paymentID,
-				OrderID:   orderID,
+				PaymentID: randomID(),
+				OrderID:   randomID(),
 				Status:    "settled",
 				SettledAt: time.Now(),
-				Type:      "PaymentSettled",
+				Type:      t,
 			}
-			payload, _ := json.Marshal(e)
-			err := w.WriteMessages(context.Background(), kafka.Message{
-				Key:   []byte(paymentID),
-				Value: payload,
-			})
-			if err != nil {
-				log.Printf("failed to write PaymentSettled: %v", err)
-			} else {
-				log.Printf("produced PaymentSettled event: %s (order %s)", paymentID, orderID)
+			key = e.PaymentID
+			payload, _ = json.Marshal(e)
+		case "InventoryAdjusted":
+			e := InventoryAdjusted{
+				EventID:    randomID(),
+				SKU:        randomID(),
+				Quantity:   rand.Intn(100),
+				AdjustedAt: time.Now(),
+				Type:       t,
 			}
-			time.Sleep(200 * time.Millisecond)
+			key = e.SKU
+			payload, _ = json.Marshal(e)
 		}
-	}
-
-	// Step 4: Inventory events (remain random)
-	for i := 0; i < 10; i++ {
-		sku := randomID()
-		e := InventoryAdjusted{
-			EventID:    randomID(),
-			SKU:        sku,
-			Quantity:   rand.Intn(100),
-			AdjustedAt: time.Now(),
-			Type:       "InventoryAdjusted",
-		}
-		payload, _ := json.Marshal(e)
 		err := w.WriteMessages(context.Background(), kafka.Message{
-			Key:   []byte(sku),
+			Key:   []byte(key),
 			Value: payload,
 		})
 		if err != nil {
-			log.Printf("failed to write InventoryAdjusted: %v", err)
+			log.Printf("failed to write message: %v", err)
 		} else {
-			log.Printf("produced InventoryAdjusted event: %s", sku)
+			log.Printf("produced %s event: %s", t, key)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
