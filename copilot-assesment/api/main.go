@@ -73,11 +73,11 @@ func main() {
 
 func getUserWithOrders(ctx context.Context, db *sql.DB, id string) (*User, error) {
 	var user User
-	err := db.QueryRowContext(ctx, `SELECT id, name, email, created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Name, &user.Email, &user.CreatedAt)
+	err := db.QueryRowContext(ctx, `SELECT id, name, email, created_at FROM users WHERE id = @p1`, sql.Named("p1", id)).Scan(&user.ID, &user.Name, &user.Email, &user.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id, user_id, amount, status, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY`, id)
+	rows, err := db.QueryContext(ctx, `SELECT id, user_id, amount, status, created_at FROM orders WHERE user_id = @p1 ORDER BY created_at DESC OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY`, sql.Named("p1", id))
 	if err != nil {
 		return nil, err
 	}
@@ -93,12 +93,12 @@ func getUserWithOrders(ctx context.Context, db *sql.DB, id string) (*User, error
 
 func getOrderWithPayment(ctx context.Context, db *sql.DB, id string) (*Order, error) {
 	var order Order
-	err := db.QueryRowContext(ctx, `SELECT id, user_id, amount, status, created_at FROM orders WHERE id = ?`, id).Scan(&order.ID, &order.UserID, &order.Amount, &order.Status, &order.CreatedAt)
+	err := db.QueryRowContext(ctx, `SELECT id, user_id, amount, status, created_at FROM orders WHERE id = @p1`, sql.Named("p1", id)).Scan(&order.ID, &order.UserID, &order.Amount, &order.Status, &order.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	var payment Payment
-	err = db.QueryRowContext(ctx, `SELECT id, order_id, status, settled_at FROM payments WHERE order_id = ?`, id).Scan(&payment.ID, &payment.OrderID, &payment.Status, &payment.SettledAt)
+	err = db.QueryRowContext(ctx, `SELECT id, order_id, status, settled_at FROM payments WHERE order_id = @p1`, sql.Named("p1", id)).Scan(&payment.ID, &payment.OrderID, &payment.Status, &payment.SettledAt)
 	if err == nil {
 		order.Payment = &payment
 	}
