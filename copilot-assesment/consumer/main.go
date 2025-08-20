@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	_ "github.com/denisenkom/go-mssqldb"
@@ -16,19 +14,20 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type OrderPlaced struct {
-	EventID   string    `json:"eventId"`
-	OrderID   string    `json:"orderId"`
-	UserID    string    `json:"userId"`
-	Amount    float64   `json:"amount"`
-	CreatedAt time.Time `json:"createdAt"`
-	Type      string    `json:"type"`
-}
 type UserCreated struct {
 	EventID   string    `json:"eventId"`
 	UserID    string    `json:"userId"`
 	Name      string    `json:"name"`
 	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"createdAt"`
+	Type      string    `json:"type"`
+}
+
+type OrderPlaced struct {
+	EventID   string    `json:"eventId"`
+	OrderID   string    `json:"orderId"`
+	UserID    string    `json:"userId"`
+	Amount    float64   `json:"amount"`
 	CreatedAt time.Time `json:"createdAt"`
 	Type      string    `json:"type"`
 }
@@ -56,163 +55,105 @@ type DLQPayload struct {
 }
 
 func main() {
-
-	var processedCount int64
-	var dlqCount int64
-	var dbLatencies []int64
-	var dbLatenciesLock sync.Mutex
 	ctx := context.Background()
+	broker := os.Getenv("KAFKA_BROKER")
+	if broker == "" {
+		broker = "localhost:9092"
+	}
+	topic := "events"
+	groupID := "event-consumer-group"
 
-	// Kafka
-	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{os.Getenv("KAFKA_BROKER")},
-		Topic:    os.Getenv("KAFKA_TOPIC"),
-		GroupID:  os.Getenv("KAFKA_GROUP_ID"),
-		MinBytes: 10e3, // 10KB
-		MaxBytes: 10e6, // 10MB
+	// Kafka reader
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{broker},
+		Topic:   topic,
+		GroupID: groupID,
 	})
-	defer kafkaReader.Close()
+	defer r.Close()
 
 	// SQL Server
-	db, err := sql.Open("mssql", os.Getenv("SQL_SERVER_DSN"))
+	db, err := sql.Open("sqlserver", os.Getenv("SQLSERVER_CONN"))
 	if err != nil {
 		log.Fatalf("failed to connect to SQL Server: %v", err)
 	}
 	defer db.Close()
 
+	// Redis
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: os.Getenv("REDIS_ADDR"),
 	})
 	defer redisClient.Close()
 
 	for {
-		m, err := kafkaReader.ReadMessage(ctx)
+		m, err := r.ReadMessage(ctx)
 		if err != nil {
-			log.Printf(`{"level":"error","msg":"error reading message","error":"%v"}`, err)
+			log.Printf("error reading message: %v", err)
 			continue
 		}
 		var base struct {
-			Type    string `json:"type"`
-			EventID string `json:"eventId"`
+			Type string `json:"type"`
 		}
 		err = json.Unmarshal(m.Value, &base)
 		if err != nil {
-			pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("json parse error: %v", err), base.EventID)
-			atomic.AddInt64(&dlqCount, 1)
+			pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("json parse error: %v", err))
 			continue
 		}
-		var eventId string
 		switch base.Type {
 		case "UserCreated":
 			var e UserCreated
 			if err := json.Unmarshal(m.Value, &e); err != nil {
-				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("UserCreated parse error: %v", err), base.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("UserCreated parse error: %v", err))
 				continue
 			}
-			eventId = e.EventID
-			if !retryUpsert(func() error {
-				start := time.Now()
-				err := upsertUser(ctx, db, e)
-				dbLatenciesLock.Lock()
-				dbLatencies = append(dbLatencies, time.Since(start).Milliseconds())
-				dbLatenciesLock.Unlock()
-				return err
-			}) {
-				pushDLQ(ctx, redisClient, m.Value, "UserCreated DB error after retries", e.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+			if err := upsertUser(ctx, db, e); err != nil {
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("UserCreated DB error: %v", err))
 				continue
 			}
 		case "OrderPlaced":
 			var e OrderPlaced
 			if err := json.Unmarshal(m.Value, &e); err != nil {
-				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("OrderPlaced parse error: %v", err), base.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("OrderPlaced parse error: %v", err))
 				continue
 			}
-			eventId = e.EventID
-			if !retryUpsert(func() error {
-				start := time.Now()
-				err := upsertOrder(ctx, db, e)
-				dbLatenciesLock.Lock()
-				dbLatencies = append(dbLatencies, time.Since(start).Milliseconds())
-				dbLatenciesLock.Unlock()
-				return err
-			}) {
-				pushDLQ(ctx, redisClient, m.Value, "OrderPlaced DB error after retries", e.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+			if err := upsertOrder(ctx, db, e); err != nil {
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("OrderPlaced DB error: %v", err))
 				continue
 			}
 		case "PaymentSettled":
 			var e PaymentSettled
 			if err := json.Unmarshal(m.Value, &e); err != nil {
-				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("PaymentSettled parse error: %v", err), base.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("PaymentSettled parse error: %v", err))
 				continue
 			}
-			eventId = e.EventID
-			if !retryUpsert(func() error {
-				start := time.Now()
-				err := upsertPayment(ctx, db, e)
-				dbLatenciesLock.Lock()
-				dbLatencies = append(dbLatencies, time.Since(start).Milliseconds())
-				dbLatenciesLock.Unlock()
-				return err
-			}) {
-				pushDLQ(ctx, redisClient, m.Value, "PaymentSettled DB error after retries", e.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+			if err := upsertPayment(ctx, db, e); err != nil {
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("PaymentSettled DB error: %v", err))
 				continue
 			}
 		case "InventoryAdjusted":
 			var e InventoryAdjusted
 			if err := json.Unmarshal(m.Value, &e); err != nil {
-				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("InventoryAdjusted parse error: %v", err), base.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("InventoryAdjusted parse error: %v", err))
 				continue
 			}
-			eventId = e.EventID
-			if !retryUpsert(func() error {
-				start := time.Now()
-				err := upsertInventory(ctx, db, e)
-				dbLatenciesLock.Lock()
-				dbLatencies = append(dbLatencies, time.Since(start).Milliseconds())
-				dbLatenciesLock.Unlock()
-				return err
-			}) {
-				pushDLQ(ctx, redisClient, m.Value, "InventoryAdjusted DB error after retries", e.EventID)
-				atomic.AddInt64(&dlqCount, 1)
+			if err := upsertInventory(ctx, db, e); err != nil {
+				pushDLQ(ctx, redisClient, m.Value, fmt.Sprintf("InventoryAdjusted DB error: %v", err))
 				continue
 			}
 		default:
-			pushDLQ(ctx, redisClient, m.Value, "unknown event type", base.EventID)
-			atomic.AddInt64(&dlqCount, 1)
+			pushDLQ(ctx, redisClient, m.Value, "unknown event type")
 		}
-		atomic.AddInt64(&processedCount, 1)
-		log.Printf(`{"level":"info","msg":"processed event","type":"%s","eventId":"%s"}`, base.Type, eventId)
+		log.Printf("processed event type: %s", base.Type)
 	}
 }
 
-func pushDLQ(ctx context.Context, rdb *redis.Client, payload []byte, errMsg string, eventId string) {
+func pushDLQ(ctx context.Context, rdb *redis.Client, payload []byte, errMsg string) {
 	dlq := DLQPayload{
 		Error:   errMsg,
 		Payload: string(payload),
 	}
 	b, _ := json.Marshal(dlq)
 	rdb.LPush(ctx, "dlq", b)
-	log.Printf(`{"level":"warn","msg":"pushed to DLQ","eventId":"%s","error":"%s"}`, eventId, errMsg)
-
-}
-
-// retryUpsert retries the given upsert function up to 3 times with a short delay.
-func retryUpsert(fn func() error) bool {
-	for i := 0; i < 3; i++ {
-		err := fn()
-		if err == nil {
-			return true
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return false
+	log.Printf("pushed to DLQ: %s", errMsg)
 }
 
 func upsertUser(ctx context.Context, db *sql.DB, e UserCreated) error {
