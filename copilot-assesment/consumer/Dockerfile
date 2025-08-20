@@ -1,0 +1,5 @@
+FROM golang:1.22-alpine
+WORKDIR /app
+COPY . .
+RUN go mod tidy && go build -o consumer .
+CMD ["./consumer"]

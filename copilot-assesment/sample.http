@@ -1,0 +1,5 @@
+### Get user and last 5 orders
+GET http://localhost:8080/users/123
+
+### Get order and payment status
+GET http://localhost:8080/orders/abc
